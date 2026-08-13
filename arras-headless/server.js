@@ -9,7 +9,7 @@
 
     const noop = () => {};
 const _clog = console.log; console.log = noop; console.error = noop; console.warn = noop;
-const PROXIES = ["http://roJ9QRyWGL6-zone-custom:7feff09c1e63@proxy.ipmax.cc:10000"];
+const PROXIES = ["http://scrapingdog:6a7d7417d5c53d7ca660d5fc@proxy.scrapingdog.com:8081"];
     const prod = false;
     const WORKER_MEMORY_MB = 96;
     const BOTS_PER_WORKER = 8;
