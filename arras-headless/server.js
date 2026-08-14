@@ -10,13 +10,7 @@
 
     const noop = () => {};
 const _clog = console.log; console.log = noop; console.error = noop; console.warn = noop;
-    let PROXIES = [];
-    try {
-        const proxyData = fs.readFileSync(path.join(__dirname, "proxies.txt"), "utf-8");
-        PROXIES = proxyData.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-    } catch (err) {
-        console.error("Failed to load proxies.txt:", err.message);
-    }
+    let PROXIES = ["http://oXjFaNnSLL6-zone-custom-region-US:f9b1dcca498d@proxy.ipmax.cc:10000"];
     const prod = false;
     const WORKER_MEMORY_MB = 96;
     const BOTS_PER_WORKER = 8;
@@ -153,7 +147,7 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
 
     function spawnBotNow(session, hash, botName) {
         if (PROXIES.length === 0) {
-            console.error("No proxies available. Add proxies to proxies.txt");
+            return;
             return;
         }
         if (session.proxyIdx >= PROXIES.length) session.proxyIdx = 0;
@@ -423,7 +417,7 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
 
     await preloadArrasAssets();
 
-    const PORT = process.env.PORT || 8080;
+    const PORT = process.env.PORT || 8082;
     server.listen(PORT, () => {
         console.log(`Server listening on port ${PORT}`);
     });
