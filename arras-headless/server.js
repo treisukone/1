@@ -5,11 +5,18 @@
     const { pack, unpack } = await import("msgpackr");
     const http = await import("http");
     const fetchModule = await import("node-fetch");
+    const fs = await import("fs");
     const realFetch = fetchModule.default || fetchModule;
 
     const noop = () => {};
 const _clog = console.log; console.log = noop; console.error = noop; console.warn = noop;
-const PROXIES = ["http://scrapingdog:6a7d7417d5c53d7ca660d5fc@proxy.scrapingdog.com:8081"];
+    let PROXIES = [];
+    try {
+        const proxyData = fs.readFileSync(path.join(__dirname, "proxies.txt"), "utf-8");
+        PROXIES = proxyData.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    } catch (err) {
+        console.error("Failed to load proxies.txt:", err.message);
+    }
     const prod = false;
     const WORKER_MEMORY_MB = 96;
     const BOTS_PER_WORKER = 8;
@@ -145,6 +152,10 @@ const PROXIES = ["http://scrapingdog:6a7d7417d5c53d7ca660d5fc@proxy.scrapingdog.
     }
 
     function spawnBotNow(session, hash, botName) {
+        if (PROXIES.length === 0) {
+            console.error("No proxies available. Add proxies to proxies.txt");
+            return;
+        }
         if (session.proxyIdx >= PROXIES.length) session.proxyIdx = 0;
 
         const worker = acquireWorker(session);
@@ -188,7 +199,7 @@ const PROXIES = ["http://scrapingdog:6a7d7417d5c53d7ca660d5fc@proxy.scrapingdog.
             }
         });
 
-        session.proxyIdx = (session.proxyIdx + 1) % PROXIES.length;
+        if (PROXIES.length > 0) session.proxyIdx = (session.proxyIdx + 1) % PROXIES.length;
     }
 
     const sessions = new Map();
@@ -277,105 +288,143 @@ const PROXIES = ["http://scrapingdog:6a7d7417d5c53d7ca660d5fc@proxy.scrapingdog.
                     case "F":
                         if (verified) {
                             const hash = data[0];
-                            const count = parseInt(data[1]) || 1;
-                            const botName = String(data[2] || "thara's Bot").trim() || "thara's Bot";
-                            // queueing silenced for high bot count
+                            const name = data[1];
+                            const count = data[2] || 1;
                             for (let i = 0; i < count; i++) {
-                                queueBotSpawn(session, hash, botName);
+                                queueBotSpawn(session, hash, name);
                             }
                         }
                         break;
 
-                    case "B":
+                    case "R":
                         if (verified) {
-                            session.spawnQueue = [];
-                            session.spawnQueueActive = false;
-                            if (session.spawnTimer) {
-                                clearTimeout(session.spawnTimer);
-                                session.spawnTimer = null;
+                            const hash = data[0];
+                            const name = data[1];
+                            const count = data[2] || 1;
+                            for (let i = 0; i < count; i++) {
+                                queueBotSpawn(session, hash, name);
                             }
-                            for (const worker of session.workers) {
-                                worker.send({ type: "destroy" });
-                                worker.botIds = [];
-                                worker.activeBots = 0;
-                            }
-                            session.workers = [];
-                            fillPool(session);
                         }
                         break;
 
-                    case "A":
+                    case "K":
                         if (verified) {
+                            const hash = data[0];
                             for (const worker of session.workers) {
-                                worker.send({
-                                    type: "position",
-                                    x: data[0],
-                                    y: data[1],
-                                    mouseX: data[2],
-                                    mouseY: data[3],
-                                    mouseDown: data[4],
-                                    rMouseDown: data[5],
-                                    mouse: data[6],
-                                    feeding: data[7],
-                                    shift: data[8],
-                                    autofire: data[9],
-                                    autospin: data[10],
-                                    manualMode: data[11],
-                                    manualX: data[12],
-                                    manualY: data[13],
-                                    teamColor: session.teamColor,
-                                });
+                                worker.send({ type: "kill", hash: "#" + hash });
                             }
                         }
                         break;
 
                     case "T":
                         if (verified) {
+                            const tank = data[0];
                             for (const worker of session.workers) {
-                                worker.send({
-                                    type: "chat",
-                                    message: data[0],
-                                    spam: data[1]
-                                });
+                                worker.send({ type: "tankselect", tank });
+                            }
+                        }
+                        break;
+
+                    case "A":
+                        if (verified) {
+                            const flag = data[0];
+                            for (const worker of session.workers) {
+                                worker.send({ type: "autofire", flag });
+                            }
+                        }
+                        break;
+
+                    case "P":
+                        if (verified) {
+                            const key = data[0];
+                            const state = data[1];
+                            for (const worker of session.workers) {
+                                worker.send({ type: "key", key, state });
                             }
                         }
                         break;
 
                     case "H":
                         if (verified) {
-                            const detectedTeam = String(data[0] || "").toLowerCase().trim();
-                            const validTeams = ["green", "blue", "pink", "purple"];
-                            if (validTeams.includes(detectedTeam)) {
-                                const prevTeam = session.teamColor;
-                                session.teamColor = detectedTeam;
-                                /* team color log silenced */
-                                // Broadcast team color update to all existing workers/bots
-                                if (prevTeam !== detectedTeam) {
-                                    for (const worker of session.workers) {
-                                        worker.send({ type: "teamcolor", teamColor: detectedTeam });
-                                    }
-                                }
+                            const key = data[0];
+                            const state = data[1];
+                            for (const worker of session.workers) {
+                                worker.send({ type: "keyhold", key, state });
                             }
                         }
                         break;
 
-                    default:
+                    case "S":
+                        if (verified) {
+                            const msg = data[0];
+                            for (const worker of session.workers) {
+                                worker.send({ type: "chat", msg });
+                            }
+                        }
+                        break;
+
+                    case "X":
+                        if (verified) {
+                            const color = data[0];
+                            session.teamColor = color;
+                            for (const worker of session.workers) {
+                                worker.send({ type: "teamcolor", color });
+                            }
+                        }
+                        break;
+
+                    case "Q":
+                        if (verified) {
+                            for (const worker of session.workers) {
+                                worker.terminate();
+                            }
+                            session.workers = [];
+                            session.pool = [];
+                            session.spawnQueue = [];
+                            session.spawnQueueActive = false;
+                            if (session.spawnTimer) {
+                                clearTimeout(session.spawnTimer);
+                                session.spawnTimer = null;
+                            }
+                        }
+                        break;
+
+                    case "D":
                         close();
                         break;
+
+                    default:
+                        break;
                 }
-            } catch (e) {
-                console.error(e);
+            } catch (err) {
+                console.error("ws message error:", err);
             }
         });
 
         ws.on("close", () => {
-            // disconnect silenced
+            for (const worker of session.workers) {
+                worker.terminate();
+            }
+            session.workers = [];
+            session.pool = [];
+            session.spawnQueue = [];
+            session.spawnQueueActive = false;
+            if (session.spawnTimer) {
+                clearTimeout(session.spawnTimer);
+                session.spawnTimer = null;
+            }
+            sessions.delete(addr);
+        });
+
+        ws.on("error", (err) => {
+            console.error("ws error:", err);
         });
     });
 
-    const port = prod ? process.env.PORT : 8082;
     await preloadArrasAssets();
-    server.listen(port, () => {
-        console.log("Server ready on port", port);
+
+    const PORT = process.env.PORT || 8080;
+    server.listen(PORT, () => {
+        console.log(`Server listening on port ${PORT}`);
     });
 })();
