@@ -17,12 +17,14 @@ const X25519_BASE = (() => {
 const SERVER_IDENTITY_KEY_HEX = '98dcbf48d0d78d81d339a2d80bbe85c5d32d7a79eb7223ee9b7c4a54e101d57c';
 const DEFAULT_PROTOCOLS = ['arras.io#v1.4+sls+et0', 'arras.io'];
 const DEFAULT_HEADERS = {
-  'accept-encoding': 'gzip, deflate, br, zstd',
+  'accept-encoding': 'gzip, deflate, br',
   'accept-language': 'en-US,en;q=0.9',
   'cache-control': 'no-cache',
+  'connection': 'Upgrade',
   'origin': 'https://arras.io',
   'pragma': 'no-cache',
-  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
+  'upgrade': 'websocket',
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 };
 const DEFAULT_PROXY_URL = 'http://spjkufyo3c:bc9QQa_elQYmp63qg5@dc.decodo.com:10000/';
 const DEFAULT_VALIDATION_R_VALUE = null;
@@ -1784,9 +1786,13 @@ class ProtocolOnlyRandomClient {
     if (proxy) {
       this.log(`Using proxy: ${proxy.url}`);
     }
+    const u = new URL(this.socketUrl);
+    const headers = Object.assign({}, DEFAULT_HEADERS, {
+      host: u.host
+    });
     this.socket = new WebSocket(this.socketUrl, DEFAULT_PROTOCOLS, {
       agent: proxy ? proxy.agent : undefined,
-      headers: DEFAULT_HEADERS,
+      headers,
       rejectUnauthorized: false
     });
     this.socket.binaryType = 'arraybuffer';
