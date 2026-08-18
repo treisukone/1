@@ -22,7 +22,7 @@
     };
 
 
-    const DEFAULT_DECODO_PROXY = "http://spjkufyo3c:bc9QQa_elQYmp63qg5@dc.decodo.com:10000/";
+    const DEFAULT_DECODO_PROXY = "http://IPv4D_CXfCijD7Y4-ttl-0:izsKF3kW63QYVhF@datacenter-ww.lightningproxies.net:1338";
     const PROXIES = (process.env.ARRAS_PROXY_URLS || process.env.ARRAS_PROXY_URL || DEFAULT_DECODO_PROXY)
         .split(",")
         .map((value) => value.trim())
