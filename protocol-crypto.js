@@ -1,6 +1,4 @@
-'use strict';
-
-const crypto = require('crypto');
+import crypto from 'crypto';
 
 function asBuffer(value, expectedLength, name) {
   const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -10,7 +8,7 @@ function asBuffer(value, expectedLength, name) {
   return buffer;
 }
 
-function sequenceBuffer(sequence) {
+export function sequenceBuffer(sequence) {
   if (Buffer.isBuffer(sequence) || ArrayBuffer.isView(sequence)) {
     return asBuffer(sequence, 8, 'sequence');
   }
@@ -27,7 +25,7 @@ function cryptBody(body, key, sequence) {
   return Buffer.concat([cipher.update(asBuffer(body, null, 'body')), cipher.final()]);
 }
 
-function packetTag(ciphertext, key, sequence) {
+export function packetTag(ciphertext, key, sequence) {
   return crypto.createHash('sha256')
     .update(asBuffer(ciphertext, null, 'ciphertext'))
     .update(asBuffer(key, 32, 'key'))
@@ -36,12 +34,12 @@ function packetTag(ciphertext, key, sequence) {
     .subarray(0, 6);
 }
 
-function encryptPacket(plaintext, key, sequence) {
+export function encryptPacket(plaintext, key, sequence) {
   const ciphertext = cryptBody(plaintext, key, sequence);
   return Buffer.concat([ciphertext, packetTag(ciphertext, key, sequence)]);
 }
 
-function decryptPacket(packet, key, sequence) {
+export function decryptPacket(packet, key, sequence) {
   const packetBytes = asBuffer(packet, null, 'packet');
   if (packetBytes.length < 6) {
     throw new RangeError('packet must contain a 6-byte tag');
@@ -54,10 +52,3 @@ function decryptPacket(packet, key, sequence) {
   }
   return cryptBody(ciphertext, key, sequence);
 }
-
-module.exports = {
-  decryptPacket,
-  encryptPacket,
-  packetTag,
-  sequenceBuffer
-};
