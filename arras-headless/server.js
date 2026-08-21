@@ -305,7 +305,6 @@
                         }
                         break;
 
-                    // client: F, hash, count, botName
                     case "F":
                         if (!verified) break;
                         {
@@ -366,6 +365,7 @@
                                 manualMode: data[11],
                                 manualX: data[12],
                                 manualY: data[13],
+                                noMove: data[14] ? 1 : 0,
                                 teamColor: session.teamColor
                             };
                             for (const w of session.workers) w.send(payload);
