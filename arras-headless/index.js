@@ -63,6 +63,70 @@
     chatSpam: ""
   };
 
+  // Feeding-mode arrival + spread (stops oscillation around leader)
+  const FEED_MOVE_CONFIG = {
+    stopRadius: 2.5,
+    slowRadius: 12,
+    maxSpeed: 1,
+    spreadRadius: 8,
+    minSpreadRadius: 3,
+    useGoldenAngle: true
+  };
+
+  function processBotFeedingMovement(bot, targetPos, config = FEED_MOVE_CONFIG) {
+    const {
+      stopRadius = 2.5,
+      slowRadius = 12,
+      maxSpeed = 1,
+      spreadRadius = 8,
+      minSpreadRadius = 3,
+      useGoldenAngle = true
+    } = config;
+
+    const id = Number(bot.id) || 0;
+    // Stable radial slot so bots don't share one (x, y)
+    const angle = useGoldenAngle
+      ? id * 2.399963229728653
+      : (id * 137.5 * Math.PI) / 180;
+    const ring =
+      minSpreadRadius +
+      (spreadRadius - minSpreadRadius) * (0.35 + 0.65 * ((id * 17) % 10) / 9);
+
+    const goalX = targetPos.x + Math.cos(angle) * ring;
+    const goalY = targetPos.y + Math.sin(angle) * ring;
+
+    const deltaX = goalX - bot.x;
+    const deltaY = goalY - bot.y;
+    const dist = Math.hypot(deltaX, deltaY);
+
+    // Hard stop: zero movement inside stop radius (prevents WASD chatter)
+    if (!(dist > stopRadius)) {
+      return { dx: 0, dy: 0, ux: 0, uy: 0, dist, speed: 0, stopped: true, goalX, goalY };
+    }
+
+    const ux = deltaX / dist;
+    const uy = deltaY / dist;
+
+    // Linear arrival brake inside slow radius
+    let speed = maxSpeed;
+    if (dist < slowRadius) speed = maxSpeed * (dist / slowRadius);
+    if (speed < 0.05) {
+      return { dx: 0, dy: 0, ux: 0, uy: 0, dist, speed: 0, stopped: true, goalX, goalY };
+    }
+
+    return {
+      dx: ux * speed,
+      dy: uy * speed,
+      ux,
+      uy,
+      dist,
+      speed,
+      stopped: false,
+      goalX,
+      goalY
+    };
+  }
+
   const builds = {
     basic: "0/4/6/7/7/7/7/4",
     triangle: "0/2/3/7/7/7/7/7",
@@ -1119,6 +1183,24 @@
                 aimTarget.x = target.x + (target.mouseX || 0);
                 aimTarget.y = target.y + (target.mouseY || 0);
               }
+            } else if (target.feed && target.x !== undefined && target.x !== null) {
+              // Feeding mode: spread around leader + arrival stop (no oscillation)
+              const feedMove = processBotFeedingMovement(
+                { id: config.id, x: position[0], y: position[1] },
+                { x: target.x, y: target.y },
+                FEED_MOVE_CONFIG
+              );
+              moveTarget.x = feedMove.goalX;
+              moveTarget.y = feedMove.goalY;
+              aimTarget.x = target.x + (target.mouseX || 0);
+              aimTarget.y = target.y + (target.mouseY || 0);
+              valid = true;
+
+              if (feedMove.stopped || !(position[2] > 0)) {
+                stopMoving();
+              } else {
+                pathfind(feedMove.goalX, feedMove.goalY);
+              }
             } else if (target.manualMode) {
               moveTarget.x = aimTarget.x = target.manualX;
               moveTarget.y = aimTarget.y = target.manualY;
@@ -1129,7 +1211,7 @@
               aimTarget.x = target.x + target.mouseX;
               aimTarget.y = target.y + target.mouseY;
 
-              if (target.followMouse || target.feed) {
+              if (target.followMouse) {
                 moveTarget.x = aimTarget.x;
                 moveTarget.y = aimTarget.y;
               }
@@ -1137,17 +1219,20 @@
             }
 
             if (valid) {
-              if (!target.noMove && position[2] > 0) {
-                pathfind(moveTarget.x, moveTarget.y);
-              } else {
-                stopMoving();
+              // Non-feed paths still use generic pathfind; feed path already handled above
+              if (!target.feed) {
+                if (!target.noMove && position[2] > 0) {
+                  pathfind(moveTarget.x, moveTarget.y);
+                } else {
+                  stopMoving();
+                }
               }
 
               let angle;
               if (target.feed) {
-                angle = Math.atan2(target.mouseY, target.mouseX);
+                angle = Math.atan2(target.mouseY || 0, target.mouseX || 0);
               } else if (target.shift) {
-                angle = Math.atan2(target.mouseY, target.mouseX);
+                angle = Math.atan2(target.mouseY || 0, target.mouseX || 0);
               } else {
                 angle = getDir(
                   position[0],
@@ -1463,7 +1548,7 @@
         mouseDown: message.mouseDown,
         rMouseDown: message.rMouseDown,
         followMouse: message.mouse,
-        feed: message.feeding,
+        feed: !!message.feeding,
         shift: message.shift,
         autofire: message.autofire,
         autospin: message.autospin,
