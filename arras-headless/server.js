@@ -14,7 +14,6 @@
     console.info = noop;
     console.debug = noop;
 
-    // only real status line we print
     let totalSpawned = 0;
     function printSpawned() {
         process.stdout.write(`\r[spawned] ${totalSpawned} bots   `);
@@ -25,7 +24,7 @@
     const PREWARM_POOL_SIZE = 4;
     const MAX_PROXIES = 4000;
 
-    let PROXIES = [];
+    let PROXY_POOL = [];
 
     const PROXY_SOURCES = [
         "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=8000&country=all&ssl=all&anonymity=all",
@@ -60,11 +59,21 @@
                 } catch {}
             })
         );
-        PROXIES = Array.from(all).slice(0, MAX_PROXIES);
-        for (let i = PROXIES.length - 1; i > 0; i--) {
+
+        PROXY_POOL = Array.from(all);
+        for (let i = PROXY_POOL.length - 1; i > 0; i--) {
             const j = (Math.random() * (i + 1)) | 0;
-            [PROXIES[i], PROXIES[j]] = [PROXIES[j], PROXIES[i]];
+            [PROXY_POOL[i], PROXY_POOL[j]] = [PROXY_POOL[j], PROXY_POOL[i]];
         }
+    }
+
+    function resetSessionProxies(session) {
+        session.proxyQueue = PROXY_POOL.slice();
+    }
+
+    function takeUniqueProxy(session) {
+        if (!session.proxyQueue || session.proxyQueue.length === 0) return null;
+        return session.proxyQueue.pop();
     }
 
     let arrasScriptCache = null;
@@ -171,8 +180,8 @@
     }
 
     function spawnBotNow(session, hash, botName) {
-        if (!PROXIES.length) return;
-        if (session.proxyIdx >= PROXIES.length) session.proxyIdx = 0;
+        const proxyUrl = takeUniqueProxy(session);
+        if (!proxyUrl) return false;
 
         const worker = acquireWorker(session);
         const botId = session.nextBotId++;
@@ -190,9 +199,6 @@
         const spawnHash = session.resolvedHash
             ? "#" + session.resolvedHash
             : "#" + rawHash;
-
-        const proxyUrl = PROXIES[session.proxyIdx];
-        session.proxyIdx = (session.proxyIdx + 1) % PROXIES.length;
 
         worker.send({
             type: "start",
@@ -212,8 +218,8 @@
                 chatSpam: "",
                 initialTarget: { tank: selectedTank },
                 squadId: rawHash,
-                reconnectAttempts: 3,
-                reconnectDelay: 10000,
+                reconnectAttempts: 2,
+                reconnectDelay: 12000,
                 arrasCache: arrasScriptCache,
                 wasmCache: arrasWasmCache,
                 teamColor: session.teamColor
@@ -222,6 +228,7 @@
 
         totalSpawned++;
         printSpawned();
+        return true;
     }
 
     const sessions = new Map();
@@ -238,7 +245,7 @@
                 tank: "auto6",
                 tanks: [],
                 tankIdx: 0,
-                proxyIdx: 0,
+                proxyQueue: [],
                 resolvedHash: null,
                 teamColor: null
             });
@@ -271,8 +278,11 @@
                     case "C":
                         if (data[0] == (challenge ^ 845)) {
                             verified = true;
+                            resetSessionProxies(session);
                             fillPool(session);
-                        } else close();
+                        } else {
+                            close();
+                        }
                         break;
 
                     case "Z":
@@ -295,6 +305,7 @@
                         }
                         break;
 
+                    // client: F, hash, count, botName
                     case "F":
                         if (!verified) break;
                         {
@@ -317,7 +328,7 @@
 
                             count = Math.min(count, 2000);
                             for (let i = 0; i < count; i++) {
-                                spawnBotNow(session, hash, botName);
+                                if (!spawnBotNow(session, hash, botName)) break;
                             }
                         }
                         break;
@@ -331,6 +342,7 @@
                         }
                         session.workers = [];
                         totalSpawned = 0;
+                        resetSessionProxies(session);
                         printSpawned();
                         fillPool(session);
                         break;
@@ -340,13 +352,20 @@
                         {
                             const payload = {
                                 type: "position",
-                                x: data[0], y: data[1],
-                                mouseX: data[2], mouseY: data[3],
-                                mouseDown: data[4], rMouseDown: data[5],
-                                mouse: data[6], feeding: data[7],
-                                shift: data[8], autofire: data[9],
-                                autospin: data[10], manualMode: data[11],
-                                manualX: data[12], manualY: data[13],
+                                x: data[0],
+                                y: data[1],
+                                mouseX: data[2],
+                                mouseY: data[3],
+                                mouseDown: data[4],
+                                rMouseDown: data[5],
+                                mouse: data[6],
+                                feeding: data[7],
+                                shift: data[8],
+                                autofire: data[9],
+                                autospin: data[10],
+                                manualMode: data[11],
+                                manualX: data[12],
+                                manualY: data[13],
                                 teamColor: session.teamColor
                             };
                             for (const w of session.workers) w.send(payload);
