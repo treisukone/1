@@ -59,6 +59,7 @@
     manualMode: false,
     manualX: 0,
     manualY: 0,
+    noMove: false,
     chatSpam: ""
   };
 
@@ -828,9 +829,7 @@
         query: ''
       }
       let lastHash = global.location.hash
-      global.prompt = global.window.prompt = function () {
-        console.log('prompt', ...arguments)
-      }
+      global.prompt = global.window.prompt = function () {}
       let devicePixelRatio = global.window.devicePixelRatio = 1
       let a = false
       global.requestAnimationFrame = global.window.requestAnimationFrame = function (f) {
@@ -845,12 +844,11 @@
         }
       }
       const console = {
-        log: new Proxy(global.console.log, {
-          apply: function (a, b, args) {
-            if (args[0] === '%cStop!' || (args[0] && args[0].startsWith && args[0].startsWith('%cHackers have been known'))) { return }
-            return Reflect.apply(a, b, args)
-          }
-        })
+        log: function () {},
+        error: function () {},
+        warn: function () {},
+        info: function () {},
+        debug: function () {}
       }
       global.console = global.window.console = console;
 
@@ -1111,7 +1109,17 @@
             let aimTarget = { x: 0, y: 0 };
             let valid = false;
 
-            if (target.manualMode) {
+            if (target.noMove) {
+              stopMoving();
+              valid = true;
+              if (target.manualMode) {
+                aimTarget.x = target.manualX;
+                aimTarget.y = target.manualY;
+              } else if (target.x !== undefined && target.x !== null) {
+                aimTarget.x = target.x + (target.mouseX || 0);
+                aimTarget.y = target.y + (target.mouseY || 0);
+              }
+            } else if (target.manualMode) {
               moveTarget.x = aimTarget.x = target.manualX;
               moveTarget.y = aimTarget.y = target.manualY;
               valid = true;
@@ -1129,7 +1137,7 @@
             }
 
             if (valid) {
-              if (position[2] > 0) {
+              if (!target.noMove && position[2] > 0) {
                 pathfind(moveTarget.x, moveTarget.y);
               } else {
                 stopMoving();
@@ -1462,6 +1470,7 @@
         manualMode: message.manualMode,
         manualX: message.manualX,
         manualY: message.manualY,
+        noMove: !!message.noMove,
       });
     } else if (message.type == 'tankselect') {
       if (message.botId === undefined) {
@@ -1482,7 +1491,6 @@
         }
       }
     } else if (message.type == 'destroy') {
-      console.log("why devastatee");
       devastate();
       if (parentPort) {
         parentPort.close();
