@@ -10,7 +10,7 @@
 
     const noop = () => {};
 const _clog = console.log; console.log = noop; console.error = noop; console.warn = noop;
-    let PROXIES = ["http://oXjFaNnSLL6-zone-custom-region-US:f9b1dcca498d@proxy.ipmax.cc:10000"];
+    let PROXIES = ["http://rotating-JP:lNDg4rN5m3ZLsZb-ufXazQ@dc-us1.redscrape.com:7777"];
     const prod = false;
     const WORKER_MEMORY_MB = 96;
     const BOTS_PER_WORKER = 8;
