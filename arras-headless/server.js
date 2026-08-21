@@ -358,7 +358,8 @@
                                 mouseDown: data[4],
                                 rMouseDown: data[5],
                                 mouse: data[6],
-                                feeding: data[7],
+                                // client feeding flag → worker enables spread + arrival stop
+                                feeding: data[7] ? 1 : 0,
                                 shift: data[8],
                                 autofire: data[9],
                                 autospin: data[10],
