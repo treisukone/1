@@ -5,18 +5,67 @@
     const { pack, unpack } = await import("msgpackr");
     const http = await import("http");
     const fetchModule = await import("node-fetch");
-    const fs = await import("fs");
     const realFetch = fetchModule.default || fetchModule;
 
     const noop = () => {};
-const _clog = console.log; console.log = noop; console.error = noop; console.warn = noop;
-    let PROXIES = ["http://rotating-JP:lNDg4rN5m3ZLsZb-ufXazQ@dc-us1.redscrape.com:7777"];
-    const prod = false;
-    const WORKER_MEMORY_MB = 96;
+    console.log = noop;
+    console.error = noop;
+    console.warn = noop;
+    console.info = noop;
+    console.debug = noop;
+
+    // only real status line we print
+    let totalSpawned = 0;
+    function printSpawned() {
+        process.stdout.write(`\r[spawned] ${totalSpawned} bots   `);
+    }
+
+    const WORKER_MEMORY_MB = 64;
     const BOTS_PER_WORKER = 8;
-    const PREWARM_POOL_SIZE = 8;
-    const SPAWN_BASE_DELAY_MS = 30;
-    const SPAWN_JITTER_MS = 60;
+    const PREWARM_POOL_SIZE = 4;
+    const MAX_PROXIES = 4000;
+
+    let PROXIES = [];
+
+    const PROXY_SOURCES = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=8000&country=all&ssl=all&anonymity=all",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt"
+    ];
+
+    async function fetchProxies() {
+        const all = new Set();
+        await Promise.allSettled(
+            PROXY_SOURCES.map(async (url) => {
+                try {
+                    const res = await realFetch(url, { timeout: 12000 });
+                    if (!res.ok) return;
+                    const text = await res.text();
+                    for (const line of text.split(/\r?\n/)) {
+                        const cleaned = line.trim().replace(/^https?:\/\//i, "");
+                        if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$/.test(cleaned)) {
+                            all.add(`http://${cleaned}`);
+                            if (all.size >= MAX_PROXIES) break;
+                        }
+                    }
+                } catch {}
+            })
+        );
+        PROXIES = Array.from(all).slice(0, MAX_PROXIES);
+        for (let i = PROXIES.length - 1; i > 0; i--) {
+            const j = (Math.random() * (i + 1)) | 0;
+            [PROXIES[i], PROXIES[j]] = [PROXIES[j], PROXIES[i]];
+        }
+    }
 
     let arrasScriptCache = null;
     let arrasWasmCache = null;
@@ -33,78 +82,62 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
     const botWorkerPath = path.join(__dirname, "index.js");
 
     function extractArrasScript(html) {
-        const scriptTagStart = html.indexOf("<script>");
-        if (scriptTagStart === -1) {
-            throw new Error("Could not find arras script tag");
-        }
-        const scriptStart = scriptTagStart + 8;
-        const scriptTagEnd = html.indexOf("</script", scriptStart);
-        if (scriptTagEnd === -1) {
-            throw new Error("Could not find arras script close tag");
-        }
-        return html.slice(scriptStart, scriptTagEnd);
+        const start = html.indexOf("<script>");
+        if (start === -1) throw new Error("no script");
+        const s = start + 8;
+        const end = html.indexOf("</script", s);
+        if (end === -1) throw new Error("no close");
+        return html.slice(s, end);
     }
 
     async function preloadArrasAssets() {
         try {
-            console.log("Preloading arras script + wasm...");
             const [htmlRes, wasmRes] = await Promise.all([
                 realFetch("https://arras.io"),
                 realFetch("https://arras.io/app.wasm")
             ]);
-
-            const html = await htmlRes.text();
-            const wasm = await wasmRes.arrayBuffer();
-
-            arrasScriptCache = extractArrasScript(html);
-            arrasWasmCache = new Uint8Array(wasm);
-            console.log("Arras preload ready:", arrasScriptCache.length, "script chars,", arrasWasmCache.byteLength, "wasm bytes");
-        } catch (err) {
-            console.error("Arras preload failed. Bots will fall back to per-worker fetch:", err);
-        }
+            arrasScriptCache = extractArrasScript(await htmlRes.text());
+            arrasWasmCache = new Uint8Array(await wasmRes.arrayBuffer());
+        } catch {}
     }
 
     function createBotWorker(session) {
         const worker = new Worker(botWorkerPath, {
             resourceLimits: {
                 maxOldGenerationSizeMb: WORKER_MEMORY_MB,
-                maxYoungGenerationSizeMb: 32,
-                codeRangeSizeMb: 32,
+                maxYoungGenerationSizeMb: 24,
+                codeRangeSizeMb: 24
             }
         });
-        worker.send = (message) => worker.postMessage(message);
+        worker.send = (msg) => worker.postMessage(msg);
         worker.botId = null;
         worker.botIds = [];
         worker.activeBots = 0;
         worker.isPooled = false;
         worker.resolvedHash = null;
-        worker.on("error", (err) => {
-            console.error(`Bot worker ${worker.botId ?? "?"} error:`, err);
-        });
+
+        worker.on("error", noop);
         worker.on("message", (message) => {
             if (!message) return;
-            if (message.type === "log") {
-                /* bot log silenced */
-            } else if (message.type === "died") {
+            if (message.type === "died") {
                 const idx = worker.botIds.indexOf(message.id);
                 if (idx !== -1) worker.botIds.splice(idx, 1);
                 worker.activeBots = Math.max(0, worker.activeBots - 1);
-            } else if (message.type === "hash_update") {
-                if (message.hash) {
-                    worker.resolvedHash = message.hash;
-                    if (session) {
-                        session.resolvedHash = message.hash;
-                        if (session.ws) session.ws.send(pack(["R", message.hash]));
+            } else if (message.type === "hash_update" && message.hash) {
+                worker.resolvedHash = message.hash;
+                if (session) {
+                    session.resolvedHash = message.hash;
+                    if (session.ws) {
+                        try { session.ws.send(pack(["R", message.hash])); } catch {}
                     }
                 }
             }
         });
-        worker.on("exit", (code) => {
+        worker.on("exit", () => {
             let idx = session.workers.indexOf(worker);
             if (idx !== -1) session.workers.splice(idx, 1);
             idx = session.pool.indexOf(worker);
             if (idx !== -1) session.pool.splice(idx, 1);
-            // worker exit silenced
         });
         return worker;
     }
@@ -113,7 +146,7 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
         worker.send({
             type: "prepare",
             arrasCache: arrasScriptCache,
-            wasmCache: arrasWasmCache,
+            wasmCache: arrasWasmCache
         });
     }
 
@@ -129,27 +162,16 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
     }
 
     function acquireWorker(session) {
-        let worker = session.workers.find((candidate) => candidate.activeBots < BOTS_PER_WORKER);
+        let worker = session.workers.find((w) => w.activeBots < BOTS_PER_WORKER);
         if (worker) return worker;
-
         worker = session.pool.shift() || createBotWorker(session);
         worker.isPooled = false;
-        if (!session.workers.includes(worker)) {
-            session.workers.push(worker);
-        }
+        if (!session.workers.includes(worker)) session.workers.push(worker);
         return worker;
     }
 
-    function queueBotSpawn(session, hash, botName) {
-        // Spawn immediately without queuing delays
-        spawnBotNow(session, hash, botName);
-    }
-
     function spawnBotNow(session, hash, botName) {
-        if (PROXIES.length === 0) {
-            return;
-            return;
-        }
+        if (!PROXIES.length) return;
         if (session.proxyIdx >= PROXIES.length) session.proxyIdx = 0;
 
         const worker = acquireWorker(session);
@@ -164,14 +186,19 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
             session.tankIdx = (session.tankIdx + 1) % session.tanks.length;
         }
 
-        const spawnHash = session.resolvedHash ? "#" + session.resolvedHash : "#" + hash;
+        const rawHash = String(hash || "").replace(/^#/, "");
+        const spawnHash = session.resolvedHash
+            ? "#" + session.resolvedHash
+            : "#" + rawHash;
+
+        const proxyUrl = PROXIES[session.proxyIdx];
+        session.proxyIdx = (session.proxyIdx + 1) % PROXIES.length;
+
         worker.send({
-            type: "start", config: {
+            type: "start",
+            config: {
                 id: botId,
-                proxy: {
-                    type: "http",
-                    url: PROXIES[session.proxyIdx]
-                },
+                proxy: { type: "http", url: proxyUrl },
                 hash: spawnHash,
                 name: botName,
                 stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -181,19 +208,20 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
                 autoRespawn: true,
                 keys: [],
                 keysHold: [],
-                tank: "Auto4",
+                tank: selectedTank,
                 chatSpam: "",
                 initialTarget: { tank: selectedTank },
-                squadId: hash,
-                reconnectAttempts: 5,
-                reconnectDelay: 8000,
+                squadId: rawHash,
+                reconnectAttempts: 3,
+                reconnectDelay: 10000,
                 arrasCache: arrasScriptCache,
                 wasmCache: arrasWasmCache,
-                teamColor: session.teamColor,
+                teamColor: session.teamColor
             }
         });
 
-        if (PROXIES.length > 0) session.proxyIdx = (session.proxyIdx + 1) % PROXIES.length;
+        totalSpawned++;
+        printSpawned();
     }
 
     const sessions = new Map();
@@ -201,37 +229,32 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
 
     wss.on("connection", (ws, req) => {
         const addr = req.socket.remoteAddress;
-        // connection silenced
 
         if (!sessions.has(addr)) {
             sessions.set(addr, {
                 workers: [],
                 pool: [],
-                spawnQueue: [],
-                spawnQueueActive: false,
-                spawnTimer: null,
                 nextBotId: 0,
                 tank: "auto6",
                 tanks: [],
                 tankIdx: 0,
                 proxyIdx: 0,
                 resolvedHash: null,
-                teamColor: null,
+                teamColor: null
             });
         }
         const session = sessions.get(addr);
         session.ws = ws;
 
-        let challenge;
+        let challenge = null;
         let verified = false;
 
-        function packet(...args) {
-            ws.send(pack(args));
-        }
-
-        function close() {
-            ws.close();
-        }
+        const packet = (...args) => {
+            try { ws.send(pack(args)); } catch {}
+        };
+        const close = () => {
+            try { ws.close(); } catch {}
+        };
 
         ws.on("message", (msg) => {
             try {
@@ -240,10 +263,7 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
 
                 switch (type) {
                     case "M":
-                        if (challenge || data[0] != 72011) {
-                            close();
-                            return;
-                        }
+                        if (challenge || data[0] != 72011) return close();
                         challenge = randint(0b1000000000, 0b1111111111);
                         packet("M", challenge);
                         break;
@@ -251,174 +271,132 @@ const _clog = console.log; console.log = noop; console.error = noop; console.war
                     case "C":
                         if (data[0] == (challenge ^ 845)) {
                             verified = true;
-                            // verify silenced
                             fillPool(session);
-                        } else {
-                            close();
-                            console.log(addr, "true noob");
-                        }
+                        } else close();
                         break;
 
                     case "Z":
                         session.tank = data[0];
-                        if (session.tank instanceof Array) {
+                        if (Array.isArray(session.tank)) {
                             session.tanks = session.tank;
                             session.tankIdx = 0;
-                            for (const worker of session.workers) {
-                                for (const botId of worker.botIds) {
+                            for (const w of session.workers) {
+                                for (const id of w.botIds) {
                                     const t = session.tanks[session.tankIdx];
-                                    worker.send({ type: "tankselect", tank: t, botId });
+                                    w.send({ type: "tankselect", tank: t, botId: id });
                                     session.tankIdx = (session.tankIdx + 1) % session.tanks.length;
                                 }
                             }
                         } else {
                             session.tanks = [];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "tankselect", tank: session.tank });
+                            for (const w of session.workers) {
+                                w.send({ type: "tankselect", tank: session.tank });
                             }
                         }
                         break;
 
                     case "F":
-                        if (verified) {
+                        if (!verified) break;
+                        {
                             const hash = data[0];
-                            const name = data[1];
-                            const count = data[2] || 1;
+                            let count = 1;
+                            let botName = "thara's Bot";
+                            const a = data[1];
+                            const b = data[2];
+
+                            if (typeof a === "number" || (typeof a === "string" && /^\d+$/.test(String(a)))) {
+                                count = Math.max(1, parseInt(a, 10) || 1);
+                                botName = String(b ?? "thara's Bot").trim() || "thara's Bot";
+                            } else if (typeof b === "number" || (typeof b === "string" && /^\d+$/.test(String(b)))) {
+                                botName = String(a ?? "thara's Bot").trim() || "thara's Bot";
+                                count = Math.max(1, parseInt(b, 10) || 1);
+                            } else {
+                                botName = String(a ?? b ?? "thara's Bot").trim() || "thara's Bot";
+                                count = 1;
+                            }
+
+                            count = Math.min(count, 2000);
                             for (let i = 0; i < count; i++) {
-                                queueBotSpawn(session, hash, name);
+                                spawnBotNow(session, hash, botName);
                             }
                         }
                         break;
 
-                    case "R":
-                        if (verified) {
-                            const hash = data[0];
-                            const name = data[1];
-                            const count = data[2] || 1;
-                            for (let i = 0; i < count; i++) {
-                                queueBotSpawn(session, hash, name);
-                            }
+                    case "B":
+                        if (!verified) break;
+                        for (const w of session.workers) {
+                            w.send({ type: "destroy" });
+                            w.botIds = [];
+                            w.activeBots = 0;
                         }
+                        session.workers = [];
+                        totalSpawned = 0;
+                        printSpawned();
+                        fillPool(session);
                         break;
 
-                    case "K":
-                        if (verified) {
-                            const hash = data[0];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "kill", hash: "#" + hash });
-                            }
+                    case "A":
+                        if (!verified) break;
+                        {
+                            const payload = {
+                                type: "position",
+                                x: data[0], y: data[1],
+                                mouseX: data[2], mouseY: data[3],
+                                mouseDown: data[4], rMouseDown: data[5],
+                                mouse: data[6], feeding: data[7],
+                                shift: data[8], autofire: data[9],
+                                autospin: data[10], manualMode: data[11],
+                                manualX: data[12], manualY: data[13],
+                                teamColor: session.teamColor
+                            };
+                            for (const w of session.workers) w.send(payload);
                         }
                         break;
 
                     case "T":
-                        if (verified) {
-                            const tank = data[0];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "tankselect", tank });
-                            }
-                        }
-                        break;
-
-                    case "A":
-                        if (verified) {
-                            const flag = data[0];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "autofire", flag });
-                            }
-                        }
-                        break;
-
-                    case "P":
-                        if (verified) {
-                            const key = data[0];
-                            const state = data[1];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "key", key, state });
-                            }
+                        if (!verified) break;
+                        {
+                            const payload = { type: "chat", message: data[0], spam: data[1] };
+                            for (const w of session.workers) w.send(payload);
                         }
                         break;
 
                     case "H":
-                        if (verified) {
-                            const key = data[0];
-                            const state = data[1];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "keyhold", key, state });
+                        if (!verified) break;
+                        {
+                            const team = String(data[0] || "").toLowerCase().trim();
+                            if (["green", "blue", "pink", "purple"].includes(team) && session.teamColor !== team) {
+                                session.teamColor = team;
+                                for (const w of session.workers) {
+                                    w.send({ type: "teamcolor", teamColor: team });
+                                }
                             }
                         }
-                        break;
-
-                    case "S":
-                        if (verified) {
-                            const msg = data[0];
-                            for (const worker of session.workers) {
-                                worker.send({ type: "chat", msg });
-                            }
-                        }
-                        break;
-
-                    case "X":
-                        if (verified) {
-                            const color = data[0];
-                            session.teamColor = color;
-                            for (const worker of session.workers) {
-                                worker.send({ type: "teamcolor", color });
-                            }
-                        }
-                        break;
-
-                    case "Q":
-                        if (verified) {
-                            for (const worker of session.workers) {
-                                worker.terminate();
-                            }
-                            session.workers = [];
-                            session.pool = [];
-                            session.spawnQueue = [];
-                            session.spawnQueueActive = false;
-                            if (session.spawnTimer) {
-                                clearTimeout(session.spawnTimer);
-                                session.spawnTimer = null;
-                            }
-                        }
-                        break;
-
-                    case "D":
-                        close();
                         break;
 
                     default:
                         break;
                 }
-            } catch (err) {
-                console.error("ws message error:", err);
-            }
+            } catch {}
         });
 
         ws.on("close", () => {
-            for (const worker of session.workers) {
-                worker.terminate();
+            for (const w of session.workers) {
+                try { w.terminate(); } catch {}
             }
             session.workers = [];
             session.pool = [];
-            session.spawnQueue = [];
-            session.spawnQueueActive = false;
-            if (session.spawnTimer) {
-                clearTimeout(session.spawnTimer);
-                session.spawnTimer = null;
-            }
             sessions.delete(addr);
         });
 
-        ws.on("error", (err) => {
-            console.error("ws error:", err);
-        });
+        ws.on("error", noop);
     });
 
+    await fetchProxies();
     await preloadArrasAssets();
 
-    const PORT = process.env.PORT || 8082;
-    server.listen(PORT, () => {
-        console.log(`Server listening on port ${PORT}`);
+    const port = process.env.PORT || 8082;
+    server.listen(port, () => {
+        process.stdout.write(`[spawned] 0 bots   `);
     });
 })();
