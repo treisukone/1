@@ -1,4 +1,10 @@
 (async () => {
+  const _silent = () => {};
+  console.log = _silent;
+  console.error = _silent;
+  console.warn = _silent;
+  console.info = _silent;
+  console.debug = _silent;
   const { WebSocket } = await import('ws');
   const { HttpsProxyAgent } = await import('https-proxy-agent');
   const { SocksProxyAgent } = await import('socks-proxy-agent');
