@@ -361,8 +361,8 @@
                                 // client feeding flag → worker enables spread + arrival stop
                                 feeding: data[7] ? 1 : 0,
                                 shift: data[8],
-                                autofire: data[9],
-                                autospin: data[10],
+                                autofire: data[9] ? 1 : 0,
+                                autospin: data[10] ? 1 : 0,
                                 manualMode: data[11],
                                 manualX: data[12],
                                 manualY: data[13],
@@ -390,6 +390,17 @@
                                 for (const w of session.workers) {
                                     w.send({ type: "teamcolor", teamColor: team });
                                 }
+                            }
+                        }
+                        break;
+
+                    // G = hunt name: bots read fillText names and move/aim toward match
+                    case "G":
+                        if (!verified) break;
+                        {
+                            const huntName = String(data[0] ?? "").trim();
+                            for (const w of session.workers) {
+                                w.send({ type: "huntname", name: huntName });
                             }
                         }
                         break;
