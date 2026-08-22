@@ -26,7 +26,7 @@
 
     let PROXY_POOL = [];
 
-    const PROXY_SOURCES = [
+    const HTTP_PROXY_SOURCES = [
         "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=8000&country=all&ssl=all&anonymity=all",
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
@@ -37,30 +37,55 @@
         "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
         "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
         "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
         "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt"
     ];
 
-    async function fetchProxies() {
-        const all = new Set();
+    const SOCKS_PROXY_SOURCES = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=8000&country=all",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
+    ];
+
+    async function fetchProxiesFromSources(sources, scheme) {
+        const out = [];
         await Promise.allSettled(
-            PROXY_SOURCES.map(async (url) => {
+            sources.map(async (url) => {
                 try {
                     const res = await realFetch(url, { timeout: 12000 });
                     if (!res.ok) return;
                     const text = await res.text();
                     for (const line of text.split(/\r?\n/)) {
-                        const cleaned = line.trim().replace(/^https?:\/\//i, "");
+                        const cleaned = line.trim().replace(/^(https?|socks5?):\/\//i, "");
                         if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$/.test(cleaned)) {
-                            all.add(`http://${cleaned}`);
-                            if (all.size >= MAX_PROXIES) break;
+                            out.push(`${scheme}://${cleaned}`);
+                            if (out.length >= MAX_PROXIES) break;
                         }
                     }
                 } catch {}
             })
         );
+        return out;
+    }
 
-        PROXY_POOL = Array.from(all);
+    async function fetchProxies() {
+        const [httpProxies, socksProxies] = await Promise.all([
+            fetchProxiesFromSources(HTTP_PROXY_SOURCES, "http"),
+            fetchProxiesFromSources(SOCKS_PROXY_SOURCES, "socks5")
+        ]);
+
+        // Interleave SOCKS5 and HTTP roughly 50/50 up to the cap
+        const mixed = [];
+        let h = 0, s = 0;
+        while (mixed.length < MAX_PROXIES && (h < httpProxies.length || s < socksProxies.length)) {
+            if (s < socksProxies.length) mixed.push(socksProxies[s++]);
+            if (h < httpProxies.length) mixed.push(httpProxies[h++]);
+        }
+
+        PROXY_POOL = mixed;
         for (let i = PROXY_POOL.length - 1; i > 0; i--) {
             const j = (Math.random() * (i + 1)) | 0;
             [PROXY_POOL[i], PROXY_POOL[j]] = [PROXY_POOL[j], PROXY_POOL[i]];
@@ -183,6 +208,7 @@
         const proxyUrl = takeUniqueProxy(session);
         if (!proxyUrl) return false;
 
+        const proxyType = proxyUrl.startsWith("socks") ? "socks" : "http";
         const worker = acquireWorker(session);
         const botId = session.nextBotId++;
         worker.botId = botId;
@@ -204,7 +230,7 @@
             type: "start",
             config: {
                 id: botId,
-                proxy: { type: "http", url: proxyUrl },
+                proxy: { type: proxyType, url: proxyUrl },
                 hash: spawnHash,
                 name: botName,
                 stats: [0, 0, 0, 0, 0, 0, 0, 9],
