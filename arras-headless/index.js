@@ -62,10 +62,40 @@
     noMove: false,
     chatSpam: "",
     huntName: "",
-    huntX: null,
-    huntY: null,
-    huntSeenAt: 0
+    huntScreenX: null,
+    huntScreenY: null,
+    huntSeenAt: 0,
+    huntScore: 0,
+    huntCoastUx: 0,
+    huntCoastUy: 0
   };
+
+  function normalizeHuntLabel(text) {
+    return String(text || "")
+      .replace(/\[.*?\]/g, " ")       // [clan]
+      .replace(/[|｜].*$/g, " ")        // trailing rank fluff
+      .replace(/[^\w\s.\-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  function scoreHuntMatch(want, got) {
+    if (!want || !got) return 0;
+    if (got === want) return 100;
+    if (got.startsWith(want) || want.startsWith(got)) return 80;
+    if (got.includes(want)) return 60;
+    // token overlap
+    const wt = want.split(" ").filter(Boolean);
+    const gt = got.split(" ").filter(Boolean);
+    if (!wt.length) return 0;
+    let hit = 0;
+    for (const t of wt) if (gt.some((g) => g === t || g.includes(t) || t.includes(g))) hit++;
+    return (hit / wt.length) * 40;
+  }
+
+  const HUNT_UI_BLOCK = /^(coordinates:|you have|survived|succumbed|respawn|back|reconnect|the server was|vanished)/i;
+
 
   // Formation / feed arrival — client already sends per-bot offsets in x,y
   // Worker only steers to that point and hard-stops (no second spread ring).
@@ -758,29 +788,29 @@
             let a = Array.from(arguments)
             const screenText = String(a[0] ?? '');
 
-            // Hunt-by-name: when target.huntName is set, remember draw position of matching labels
-            if (target.huntName && screenText) {
-              const want = String(target.huntName).trim().toLowerCase();
-              const got = screenText.trim().toLowerCase();
-              if (want && got && (got === want || got.includes(want) || want.includes(got))) {
-                // skip UI chrome / death strings
-                if (
-                  !got.startsWith('coordinates:') &&
-                  !got.startsWith('you have') &&
-                  !got.startsWith('survived') &&
-                  got !== 'respawn' &&
-                  got !== 'back' &&
-                  got !== 'reconnect' &&
-                  screenText.length >= 1 &&
-                  screenText.length < 24
-                ) {
+            // Hunt-by-name: score fillText labels and EMA-smooth their screen position
+            if (target.huntName && screenText && screenText.length < 32) {
+              if (!HUNT_UI_BLOCK.test(screenText.trim())) {
+                const want = normalizeHuntLabel(target.huntName);
+                const got = normalizeHuntLabel(screenText);
+                const score = scoreHuntMatch(want, got);
+                if (score >= 40) {
                   const tx = typeof a[1] === 'number' ? a[1] : null;
                   const ty = typeof a[2] === 'number' ? a[2] : null;
                   if (tx != null && ty != null) {
-                    // canvas text pos → rough world aim relative to screen center
-                    target.huntScreenX = tx;
-                    target.huntScreenY = ty;
-                    target.huntSeenAt = Date.now();
+                    // Prefer better matches; smooth position to reduce jitter
+                    if (score >= (target.huntScore || 0) - 5) {
+                      const alpha = 0.35;
+                      if (target.huntScreenX == null) {
+                        target.huntScreenX = tx;
+                        target.huntScreenY = ty;
+                      } else {
+                        target.huntScreenX = target.huntScreenX * (1 - alpha) + tx * alpha;
+                        target.huntScreenY = target.huntScreenY * (1 - alpha) + ty * alpha;
+                      }
+                      target.huntScore = Math.max(score, (target.huntScore || 0) * 0.9);
+                      target.huntSeenAt = Date.now();
+                    }
                   }
                 }
               }
@@ -1222,32 +1252,46 @@
             let aimTarget = { x: 0, y: 0 };
             let valid = false;
 
-            // Name hunt: if we recently saw the name via fillText, steer that way
-            const huntFresh = target.huntName && target.huntSeenAt && (Date.now() - target.huntSeenAt < 2500);
-            if (huntFresh && target.huntScreenX != null && !target.noMove) {
-              const sx = target.huntScreenX;
-              const sy = target.huntScreenY;
-              // Screen delta from canvas center → world-ish direction
+            // Name hunt: track fillText nameplate, aim + move, coast briefly if lost
+            const huntAge = target.huntSeenAt ? (Date.now() - target.huntSeenAt) : 1e9;
+            const huntLive = target.huntName && target.huntScreenX != null && huntAge < 1800;
+            const huntCoast = target.huntName && huntAge >= 1800 && huntAge < 4000 && (target.huntCoastUx || target.huntCoastUy);
+            if ((huntLive || huntCoast) && !target.noMove) {
               const cx = innerWidth / 2;
               const cy = innerHeight / 2;
-              const dirX = sx - cx;
-              const dirY = sy - cy;
-              const len = Math.hypot(dirX, dirY) || 1;
-              const ux = dirX / len;
-              const uy = dirY / len;
-              // Step toward name plate from current position estimate
-              const step = 18;
-              moveTarget.x = position[0] + ux * step;
-              moveTarget.y = position[1] + uy * step;
+              let ux, uy, len;
+              if (huntLive) {
+                const dirX = target.huntScreenX - cx;
+                const dirY = target.huntScreenY - cy;
+                len = Math.hypot(dirX, dirY) || 1;
+                ux = dirX / len;
+                uy = dirY / len;
+                target.huntCoastUx = ux;
+                target.huntCoastUy = uy;
+                // Decay match score so a better name can take over
+                target.huntScore = (target.huntScore || 0) * 0.995;
+              } else {
+                ux = target.huntCoastUx;
+                uy = target.huntCoastUy;
+                len = 80;
+              }
+              // Closer on screen → smaller step (arrive-ish); far → push harder
+              const screenDist = huntLive ? len : 120;
+              const step = screenDist < 40 ? 0 : screenDist < 90 ? 10 : 22;
+              moveTarget.x = position[0] + ux * Math.max(step, 1);
+              moveTarget.y = position[1] + uy * Math.max(step, 1);
               aimTarget.x = moveTarget.x;
               aimTarget.y = moveTarget.y;
               valid = true;
-              if (position[2] > 0) pathfind(moveTarget.x, moveTarget.y);
-              else stopMoving();
+              if (step === 0 || !(position[2] > 0)) stopMoving();
+              else pathfind(moveTarget.x, moveTarget.y);
               controller.x = cx + ux * 200;
               controller.y = cy + uy * 200;
               trigger.mousemove(controller.x, controller.y);
-              // still allow fire below
+              // Auto hold fire while actively hunting a visible name
+              if (huntLive && screenDist < 220) {
+                target.mouseDown = true;
+              }
             } else if (target.noMove) {
               stopMoving();
               valid = true;
@@ -1653,7 +1697,10 @@
         huntName: name,
         huntScreenX: null,
         huntScreenY: null,
-        huntSeenAt: 0
+        huntSeenAt: 0,
+        huntScore: 0,
+        huntCoastUx: 0,
+        huntCoastUy: 0
       });
     } else if (message.type == 'tankselect') {
       if (message.botId === undefined) {
