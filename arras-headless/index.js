@@ -60,57 +60,77 @@
     manualX: 0,
     manualY: 0,
     noMove: false,
-    chatSpam: ""
+    chatSpam: "",
+    huntName: "",
+    huntX: null,
+    huntY: null,
+    huntSeenAt: 0
   };
 
-  // Feeding-mode arrival + spread (stops oscillation around leader)
+  // Formation / feed arrival — client already sends per-bot offsets in x,y
+  // Worker only steers to that point and hard-stops (no second spread ring).
   const FEED_MOVE_CONFIG = {
-    stopRadius: 2.5,
-    slowRadius: 12,
+    stopRadius: 4,      // hard stop (release WASD)
+    startRadius: 7,     // hysteresis: only resume move when farther than this
+    slowRadius: 18,     // begin soft approach
     maxSpeed: 1,
-    spreadRadius: 8,
-    minSpreadRadius: 3,
+    // set applyWorkerSpread true ONLY if client does NOT send formation offsets
+    applyWorkerSpread: false,
+    spreadRadius: 10,
+    minSpreadRadius: 4,
     useGoldenAngle: true
   };
 
   function processBotFeedingMovement(bot, targetPos, config = FEED_MOVE_CONFIG) {
     const {
-      stopRadius = 2.5,
-      slowRadius = 12,
+      stopRadius = 4,
+      startRadius = 7,
+      slowRadius = 18,
       maxSpeed = 1,
-      spreadRadius = 8,
-      minSpreadRadius = 3,
+      applyWorkerSpread = false,
+      spreadRadius = 10,
+      minSpreadRadius = 4,
       useGoldenAngle = true
     } = config;
 
-    const id = Number(bot.id) || 0;
-    // Stable radial slot so bots don't share one (x, y)
-    const angle = useGoldenAngle
-      ? id * 2.399963229728653
-      : (id * 137.5 * Math.PI) / 180;
-    const ring =
-      minSpreadRadius +
-      (spreadRadius - minSpreadRadius) * (0.35 + 0.65 * ((id * 17) % 10) / 9);
+    let goalX = targetPos.x;
+    let goalY = targetPos.y;
 
-    const goalX = targetPos.x + Math.cos(angle) * ring;
-    const goalY = targetPos.y + Math.sin(angle) * ring;
+    // Optional worker-side ring (off by default — client formation is authoritative)
+    if (applyWorkerSpread) {
+      const id = Number(bot.id) || 0;
+      const angle = useGoldenAngle
+        ? id * 2.399963229728653
+        : (id * 137.5 * Math.PI) / 180;
+      const ring =
+        minSpreadRadius +
+        (spreadRadius - minSpreadRadius) * (0.35 + 0.65 * ((id * 17) % 10) / 9);
+      goalX = targetPos.x + Math.cos(angle) * ring;
+      goalY = targetPos.y + Math.sin(angle) * ring;
+    }
 
     const deltaX = goalX - bot.x;
     const deltaY = goalY - bot.y;
     const dist = Math.hypot(deltaX, deltaY);
 
-    // Hard stop: zero movement inside stop radius (prevents WASD chatter)
-    if (!(dist > stopRadius)) {
+    // Hysteresis: stay stopped until outside startRadius (kills orbit/jitter)
+    if (!bot._feedMoving) {
+      if (dist <= startRadius) {
+        return { dx: 0, dy: 0, ux: 0, uy: 0, dist, speed: 0, stopped: true, goalX, goalY };
+      }
+      bot._feedMoving = true;
+    }
+    if (dist <= stopRadius) {
+      bot._feedMoving = false;
       return { dx: 0, dy: 0, ux: 0, uy: 0, dist, speed: 0, stopped: true, goalX, goalY };
     }
 
     const ux = deltaX / dist;
     const uy = deltaY / dist;
-
-    // Linear arrival brake inside slow radius
     let speed = maxSpeed;
     if (dist < slowRadius) speed = maxSpeed * (dist / slowRadius);
     if (speed < 0.05) {
+      bot._feedMoving = false;
       return { dx: 0, dy: 0, ux: 0, uy: 0, dist, speed: 0, stopped: true, goalX, goalY };
     }
 
@@ -527,6 +547,7 @@
       const target = { ...sharedTarget, ...(config.initialTarget || {}) };
       let trigger = {};
       let lastAutofire = false;
+      let lastAutospin = false;
       let lastChatAt = 0;
       let isJoining = false;
       const log = function () {
@@ -736,6 +757,34 @@
             if (ignore) { return }
             let a = Array.from(arguments)
             const screenText = String(a[0] ?? '');
+
+            // Hunt-by-name: when target.huntName is set, remember draw position of matching labels
+            if (target.huntName && screenText) {
+              const want = String(target.huntName).trim().toLowerCase();
+              const got = screenText.trim().toLowerCase();
+              if (want && got && (got === want || got.includes(want) || want.includes(got))) {
+                // skip UI chrome / death strings
+                if (
+                  !got.startsWith('coordinates:') &&
+                  !got.startsWith('you have') &&
+                  !got.startsWith('survived') &&
+                  got !== 'respawn' &&
+                  got !== 'back' &&
+                  got !== 'reconnect' &&
+                  screenText.length >= 1 &&
+                  screenText.length < 24
+                ) {
+                  const tx = typeof a[1] === 'number' ? a[1] : null;
+                  const ty = typeof a[2] === 'number' ? a[2] : null;
+                  if (tx != null && ty != null) {
+                    // canvas text pos → rough world aim relative to screen center
+                    target.huntScreenX = tx;
+                    target.huntScreenY = ty;
+                    target.huntSeenAt = Date.now();
+                  }
+                }
+              }
+            }
             if (this.font === 'bold 7px Ubuntu' && this.fillStyle === 'rgb(255,255,255)') {
               if (screenText === `You have spawned! Welcome to the game.`) {
                 hasJoined = firstJoin = true;
@@ -1173,7 +1222,33 @@
             let aimTarget = { x: 0, y: 0 };
             let valid = false;
 
-            if (target.noMove) {
+            // Name hunt: if we recently saw the name via fillText, steer that way
+            const huntFresh = target.huntName && target.huntSeenAt && (Date.now() - target.huntSeenAt < 2500);
+            if (huntFresh && target.huntScreenX != null && !target.noMove) {
+              const sx = target.huntScreenX;
+              const sy = target.huntScreenY;
+              // Screen delta from canvas center → world-ish direction
+              const cx = innerWidth / 2;
+              const cy = innerHeight / 2;
+              const dirX = sx - cx;
+              const dirY = sy - cy;
+              const len = Math.hypot(dirX, dirY) || 1;
+              const ux = dirX / len;
+              const uy = dirY / len;
+              // Step toward name plate from current position estimate
+              const step = 18;
+              moveTarget.x = position[0] + ux * step;
+              moveTarget.y = position[1] + uy * step;
+              aimTarget.x = moveTarget.x;
+              aimTarget.y = moveTarget.y;
+              valid = true;
+              if (position[2] > 0) pathfind(moveTarget.x, moveTarget.y);
+              else stopMoving();
+              controller.x = cx + ux * 200;
+              controller.y = cy + uy * 200;
+              trigger.mousemove(controller.x, controller.y);
+              // still allow fire below
+            } else if (target.noMove) {
               stopMoving();
               valid = true;
               if (target.manualMode) {
@@ -1184,19 +1259,28 @@
                 aimTarget.y = target.y + (target.mouseY || 0);
               }
             } else if (target.feed && target.x !== undefined && target.x !== null) {
-              // Feeding mode: spread around leader + arrival stop (no oscillation)
+              // Client sends formation slot as x,y — arrive and stop (no double-offset)
+              if (!config._feedMoveState) config._feedMoveState = { _feedMoving: false };
+              const feedBot = {
+                id: config.id,
+                x: position[0],
+                y: position[1],
+                _feedMoving: config._feedMoveState._feedMoving
+              };
               const feedMove = processBotFeedingMovement(
-                { id: config.id, x: position[0], y: position[1] },
+                feedBot,
                 { x: target.x, y: target.y },
                 FEED_MOVE_CONFIG
               );
+              config._feedMoveState._feedMoving = !!feedBot._feedMoving;
+
               moveTarget.x = feedMove.goalX;
               moveTarget.y = feedMove.goalY;
               aimTarget.x = target.x + (target.mouseX || 0);
               aimTarget.y = target.y + (target.mouseY || 0);
               valid = true;
 
-              if (feedMove.stopped || !(position[2] > 0)) {
+              if (feedMove.stopped || target.noMove || !(position[2] > 0)) {
                 stopMoving();
               } else {
                 pathfind(feedMove.goalX, feedMove.goalY);
@@ -1208,10 +1292,11 @@
             } else if (target.x !== undefined && target.x !== null) {
               moveTarget.x = target.x;
               moveTarget.y = target.y;
-              aimTarget.x = target.x + target.mouseX;
-              aimTarget.y = target.y + target.mouseY;
+              aimTarget.x = target.x + (target.mouseX || 0);
+              aimTarget.y = target.y + (target.mouseY || 0);
 
-              if (target.followMouse) {
+              // Chase mouse only if followMouse and NOT autospin (C spin is aim-only)
+              if (target.followMouse && !target.autospin) {
                 moveTarget.x = aimTarget.x;
                 moveTarget.y = aimTarget.y;
               }
@@ -1253,6 +1338,11 @@
             if (target.autofire !== lastAutofire) {
               controller.press("KeyE");
               lastAutofire = target.autofire;
+            }
+            // Game auto-spin is KeyC (not orbiting the host)
+            if (!!target.autospin !== lastAutospin) {
+              controller.press("KeyC");
+              lastAutospin = !!target.autospin;
             }
             if (target.chatSpam && Date.now() - lastChatAt > 3000) {
               lastChatAt = Date.now();
@@ -1556,6 +1646,14 @@
         manualX: message.manualX,
         manualY: message.manualY,
         noMove: !!message.noMove,
+      });
+    } else if (message.type == 'huntname') {
+      const name = String(message.name || '').trim();
+      updateAllTargets({
+        huntName: name,
+        huntScreenX: null,
+        huntScreenY: null,
+        huntSeenAt: 0
       });
     } else if (message.type == 'tankselect') {
       if (message.botId === undefined) {
